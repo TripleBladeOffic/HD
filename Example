@@ -1,1 +1,282 @@
+-- Services
+local players = game:GetService("Players")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local serverStorage = game:GetService("ServerStorage")
+local dataStoreService = game:GetService("DataStoreService")
+local tweenService = game:GetService("TweenService")
 
+-- Variables
+local fruitCount = 0
+local maxFruitCount = 5
+local spawning = false
+
+-- Folders and Instances
+local fruitFolder = workspace.Fruits
+local bossFruit = workspace.BossFruit
+local droppedFruitsFolder = workspace.DroppedFruits
+local spawningPlatform = workspace.SpawningPlatform
+local sellingPlatform = workspace.SellingPlatform
+local upgradePlatform = workspace.UpgradePlatform
+local bossHealthDisplay = workspace.BossHealthDisplay
+local bossHealthText = bossHealthDisplay.SurfaceGui.TextLabel
+local bossPlatform = workspace.BossPlatform
+local bossHealth = bossFruit.Health
+
+-- DataStore
+local dataBase = dataStoreService:GetDataStore("Data")
+
+-- Remote Events
+local dropFruitRemote = replicatedStorage.dropFruit
+
+-- Fruit Names
+local fruitNames = {
+	"Apple",
+	"Banana",
+	"Orange"
+}
+
+-- Player Added Event
+players.PlayerAdded:Connect(function(player)
+	-- Create Inventory and Leaderstats Folders
+	local Inventory = Instance.new("Folder")
+	Inventory.Name = "Inventory"
+	Inventory.Parent = player
+
+	local inventorySpace = Instance.new("IntValue")
+	inventorySpace.Name = "inventorySpace"
+	inventorySpace.Parent = player
+
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local Money = Instance.new("IntValue")
+	Money.Name = "Money"
+	Money.Parent = leaderstats
+
+	-- Load Player Data
+	local UserID = player.UserId
+	local success, Data = pcall(function()
+		return dataBase:GetAsync(tostring(UserID))
+	end)
+
+	if success then
+		if Data == nil then
+			-- Default values for new players
+			Money.Value = 50
+			inventorySpace.Value = 5
+		else
+			-- Load saved data
+			Money.Value = Data.Money
+			inventorySpace.Value = Data.inventorySpace
+		end
+	else
+		warn("Failed to load data for player:", player.Name, "Error:", Data)
+		Money.Value = 50 -- Default value if data loading fails
+	end
+end)
+
+-- Player Removing Event
+players.PlayerRemoving:Connect(function(player)
+	local UserID = player.UserId
+	local Data = {
+		money = player:FindFirstChild("leaderstats"):FindFirstChild("Money").Value,
+		inventorySpace = player:FindFirstChild("inventorySpace").Value
+	}
+
+	-- Save Player Data
+	local success, errorMessage = pcall(function()
+		dataBase:SetAsync(tostring(UserID), Data)
+		print(Data)
+	end)
+
+	if not success then
+		warn("Failed to save data for player:", player.Name, "Error:", errorMessage)
+	end
+end)
+
+-- Function to Spawn Fruits
+local function spawnFruit()
+	spawning = true
+
+	while fruitCount < maxFruitCount do
+		fruitCount = fruitCount + 1
+		print("Spawned Fruit: " .. tostring(fruitCount))
+
+		-- Calculate random position on the spawning platform
+		local platformSize = spawningPlatform.Size
+		local platformPosition = spawningPlatform.Position
+		local X = math.random(platformPosition.X - platformSize.X / 2, platformPosition.X + platformSize.X / 2)
+		local Y = platformPosition.Y + 5
+		local Z = math.random(platformPosition.Z - platformSize.Z / 2, platformPosition.Z + platformSize.Z / 2)
+
+		-- Select a random fruit
+		local newFruit = math.random(1, #fruitNames)
+		newFruit = fruitNames[newFruit]
+		newFruit = replicatedStorage:FindFirstChild(newFruit):Clone()
+		newFruit.Parent = fruitFolder
+		newFruit.Position = Vector3.new(X, Y, Z)
+		newFruit.Anchored = false
+
+		-- Tween to shrink the fruit
+		local smallerFruit = tweenService:Create(newFruit, TweenInfo.new(
+			10,
+			Enum.EasingStyle.Sine,
+			Enum.EasingDirection.In),
+			{
+				Size = Vector3.new(1, 1, 1)
+			})
+		smallerFruit:Play()
+
+		-- Destroy fruit after tween completes
+		smallerFruit.Completed:Connect(function()
+			task.spawn(function()
+				task.wait(15)
+				newFruit:Destroy()
+			end)
+		end)
+
+		-- Handle fruit touch events
+		newFruit.Touched:Connect(function(hit)
+			local playerTouched = players:GetPlayerFromCharacter(hit.Parent)
+
+			if playerTouched then
+				-- Check player's inventory space
+				local inventoryCount = 0
+				for _, child in ipairs(playerTouched:FindFirstChild("Inventory"):GetChildren()) do
+					inventoryCount = inventoryCount + 1
+				end
+
+				if playerTouched:FindFirstChild("inventorySpace") and inventoryCount < playerTouched:FindFirstChild("inventorySpace").Value then
+					newFruit.Parent = playerTouched:FindFirstChild("Inventory")
+					smallerFruit:Cancel()
+				end
+			elseif hit == sellingPlatform then
+				-- Sell fruit and reward player
+				local droppedBy = newFruit:GetAttribute("droppedBy")
+				local player = players:GetPlayerByUserId(droppedBy)
+				local fruitVolume = newFruit.Size.X * newFruit.Size.Y * newFruit.Size.Z
+				player:FindFirstChild("leaderstats"):FindFirstChild("Money").Value += (fruitVolume * 10)
+				newFruit:Destroy()
+			end
+		end)
+
+		task.wait(1)
+	end
+
+	spawning = false
+end
+
+-- Handle fruit removal and respawn
+fruitFolder.ChildRemoved:Connect(function()
+	fruitCount = fruitCount - 1
+	if not spawning then
+		spawnFruit()
+	end
+end)
+
+-- Handle dropping fruits
+dropFruitRemote.OnServerEvent:Connect(function(player, fruit)
+	local rootPart = player.Character:FindFirstChild("HumanoidRootPart")
+	fruit.Parent = droppedFruitsFolder
+	fruit.Position = rootPart.Position + rootPart.CFrame.LookVector * 10
+
+	-- Track who dropped the fruit
+	local droppedBy = player.UserId
+	fruit:SetAttribute("droppedBy", droppedBy)
+end)
+
+-- Upgrade Platform Logic
+local debounce = false
+local cooldown = 1
+
+upgradePlatform.Touched:Connect(function(hit)
+	if debounce then
+		return
+	end
+
+	debounce = true
+
+	local player = players:GetPlayerFromCharacter(hit.Parent)
+	if player then
+		local playersMoney = player:FindFirstChild("leaderstats"):FindFirstChild("Money")
+		if playersMoney then
+			local Money = playersMoney.Value
+
+			-- Check if player has enough money to upgrade
+			if Money >= 100 then
+				playersMoney.Value = playersMoney.Value - 100
+				local playerInvSpace = player:FindFirstChild("inventorySpace")
+				if playerInvSpace then
+					playerInvSpace.Value = playerInvSpace.Value + 1
+				end
+			end
+		end
+	end
+
+	task.wait(cooldown)
+	debounce = false
+end)
+
+-- Boss Logic
+bossHealth.Value = 1
+local debouncer = false
+
+bossPlatform.Touched:Connect(function(hit)
+	if debouncer then
+		return
+	end
+
+	debouncer = true
+
+	if hit.Parent == droppedFruitsFolder then
+		-- Reduce boss health
+		bossHealth.Value = bossHealth.Value - 1
+		bossHealthText.Text = bossHealth.Value .. " Fruits"
+		hit:Destroy()
+
+		-- Check if boss is defeated
+		if bossHealth.Value == 0 then
+			local tweenInfo = TweenInfo.new(3,
+				Enum.EasingStyle.Cubic,
+				Enum.EasingDirection.Out
+			)
+			local tweenTable = {
+				Size = Vector3.new(5, 5, 5),
+				CFrame = bossFruit.CFrame * CFrame.Angles(math.rad(90), math.rad(90), math.rad(90))
+			}
+
+			-- Tween boss fruit for defeat animation
+			local tween = tweenService:Create(bossFruit, tweenInfo, tweenTable)
+			tween:Play()
+
+			-- Add particle effect
+			local particle = Instance.new("ParticleEmitter")
+			particle.Texture = "rbxassetid://12345678"
+			particle.Rate = 50
+			particle.Lifetime = NumberRange.new(2, 4)
+			particle.Speed = NumberRange.new(5, 10)
+			particle.Parent = bossFruit
+
+			-- Handle boss defeat
+			tween.Completed:Connect(function()
+				task.wait(1)
+				bossFruit:Destroy()
+				maxFruitCount = maxFruitCount + 5
+
+				-- Reward all players
+				for _, player in ipairs(players:GetPlayers()) do
+					local leaderstats = player:FindFirstChild("leaderstats")
+					local Money = leaderstats:FindFirstChild("Money")
+					Money.Value = Money.Value + 500
+					print("Boss Defeated")
+				end
+			end)
+		end
+	end
+
+	debouncer = false
+end)
+
+-- Start spawning fruits
+spawnFruit()
